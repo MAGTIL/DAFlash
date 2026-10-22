@@ -31,6 +31,17 @@ struct CandidateItem {
     bool isHighlighted;
 };
 
+constexpr uint32_t COMMIT_RING_SIZE = 16;
+
+struct CommitRecord {
+    uint32_t seq;
+    wchar_t text[64];
+    float x;
+    float y;
+    float w;
+    float h;
+};
+
 struct IpcData {
     uint32_t version;
     uint32_t sequence;
@@ -38,7 +49,7 @@ struct IpcData {
     uint32_t candidateCount;
     int32_t highlightedIndex;
     
-    // 上屏候选词信息
+    // 上屏候选词信息 (保留兼容)
     wchar_t committedText[64];
     float commitX;
     float commitY;
@@ -54,6 +65,22 @@ struct IpcData {
     float preeditY;
     float preeditW;
     float preeditH;
+
+    // --- 独立事件通道 (彻底解决高频光标刷新覆盖上屏事件的竞态) ---
+    // 1. 光标/输入坐标通道 (由 OnInputPositionUpdated 持续更新)
+    uint32_t caretSeq;
+    float caretX;
+    float caretY;
+    float caretW;
+    float caretH;
+
+    // 2. 真实上屏事件环形队列 (由 OnRimeCommit 写入，DAFlash 批量消费，绝不丢包)
+    uint32_t commitSeq;
+    CommitRecord commitRing[COMMIT_RING_SIZE];
+
+    // 3. 候选词面板状态通道
+    uint32_t panelSeq;
+    bool isPanelVisible;
 };
 
 } // namespace DAFlash

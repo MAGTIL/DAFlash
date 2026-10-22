@@ -350,22 +350,25 @@ void WeaselHookManager::OnWeaselPanelVisibility(HWND hWnd, bool visible) {
     bool wasVisible = isPanelVisible_;
     isPanelVisible_ = visible;
 
+    if (pIpcData_ && hMutex_) {
+        WaitForSingleObject(hMutex_, 50);
+        pIpcData_->isPanelVisible = visible;
+        pIpcData_->panelSeq++;
+        if (!visible) {
+            pIpcData_->candidateCount = 0;
+            pIpcData_->eventType = IpcEventType::WindowHidden;
+            pIpcData_->committedText[0] = L'\0';
+        }
+        MemoryBarrier();
+        pIpcData_->sequence++;
+        ReleaseMutex(hMutex_);
+        if (hEvent_) SetEvent(hEvent_);
+    }
+
     if (wasVisible && !visible) {
-        // Window transitioned from shown to hidden
         lastCommittedCandidate_.clear();
         tempCandidates_.clear();
         currentCandidates_.clear();
-
-        if (pIpcData_ && hMutex_) {
-            WaitForSingleObject(hMutex_, 50);
-            pIpcData_->eventType = IpcEventType::WindowHidden;
-            pIpcData_->committedText[0] = L'\0';
-            pIpcData_->candidateCount = 0;
-            MemoryBarrier();
-            pIpcData_->sequence++;
-            ReleaseMutex(hMutex_);
-            if (hEvent_) SetEvent(hEvent_);
-        }
     }
 }
 
@@ -457,6 +460,19 @@ void WeaselHookManager::OnRimeCommit(const char* utf8Text) {
     wstr.resize(len - 1);
 
     if (hMutex_) WaitForSingleObject(hMutex_, 50);
+
+    // 1. 写入专属上屏环形队列 (确保在任何应用、任何高频光标刷新下绝不丢包)
+    uint32_t nextSeq = pIpcData_->commitSeq + 1;
+    uint32_t slot = nextSeq % COMMIT_RING_SIZE;
+    pIpcData_->commitRing[slot].seq = nextSeq;
+    wcsncpy_s(pIpcData_->commitRing[slot].text, wstr.c_str(), 63);
+    pIpcData_->commitRing[slot].x = pIpcData_->caretX;
+    pIpcData_->commitRing[slot].y = pIpcData_->caretY;
+    pIpcData_->commitRing[slot].w = pIpcData_->caretW > 0 ? pIpcData_->caretW : 80.0f;
+    pIpcData_->commitRing[slot].h = pIpcData_->caretH > 0 ? pIpcData_->caretH : 28.0f;
+    pIpcData_->commitSeq = nextSeq;
+
+    // 兼容旧字段
     wcsncpy_s(pIpcData_->committedText, wstr.c_str(), 63);
     pIpcData_->eventType = IpcEventType::CandidateCommitted;
     MemoryBarrier();
@@ -471,19 +487,27 @@ void WeaselHookManager::OnRimeCommit(const char* utf8Text) {
     tempCandidates_.clear();
     currentCandidates_.clear();
 
-    LogHook("OnRimeCommit: " + std::string(utf8Text) + " (seq=" + std::to_string(pIpcData_->sequence) + ") at (" + std::to_string(pIpcData_->commitX) + ", " + std::to_string(pIpcData_->commitY) + ")");
+    LogHook("OnRimeCommit: " + std::string(utf8Text) + " (commitSeq=" + std::to_string(nextSeq) + ") at (" + std::to_string(pIpcData_->caretX) + ", " + std::to_string(pIpcData_->caretY) + ")");
 }
 
 void WeaselHookManager::OnInputPositionUpdated(int left, int top, int height) {
     if (!pIpcData_) return;
     if (hMutex_) WaitForSingleObject(hMutex_, 50);
-    pIpcData_->commitX = static_cast<float>(left);
-    pIpcData_->commitY = static_cast<float>(top);
-    pIpcData_->commitW = 80.0f;
-    pIpcData_->commitH = height > 0 ? static_cast<float>(height) : 28.0f;
-    pIpcData_->eventType = IpcEventType::PositionUpdated;
+
+    // 1. 专属光标坐标更新通道 (高频，绝不污染或覆盖上屏事件)
+    pIpcData_->caretX = static_cast<float>(left);
+    pIpcData_->caretY = static_cast<float>(top);
+    pIpcData_->caretW = 80.0f;
+    pIpcData_->caretH = height > 0 ? static_cast<float>(height) : 28.0f;
+    pIpcData_->caretSeq++;
+
+    // 兼容旧字段
+    pIpcData_->commitX = pIpcData_->caretX;
+    pIpcData_->commitY = pIpcData_->caretY;
+    pIpcData_->commitW = pIpcData_->caretW;
+    pIpcData_->commitH = pIpcData_->caretH;
+
     MemoryBarrier();
-    pIpcData_->sequence++;
     if (hMutex_) ReleaseMutex(hMutex_);
     if (hEvent_) SetEvent(hEvent_);
     LogHook("OnInputPositionUpdated: (" + std::to_string(left) + ", " + std::to_string(top) + ", h=" + std::to_string(height) + ")");

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "Common.h"
 #include "IpcProtocol.h"
@@ -41,6 +41,10 @@ private:
     HANDLE hMutex_ = nullptr;
     HANDLE hEvent_ = nullptr;
     uint32_t lastIpcSeq_ = 0;
+    uint32_t lastReadCommitSeq_ = 0;
+    uint32_t lastCaretSeq_ = 0;
+    uint32_t lastPanelSeq_ = 0;
+    bool isComposing_ = false;
 
     // WPM & Combo
     std::deque<std::chrono::steady_clock::time_point> keystrokeTimes_;

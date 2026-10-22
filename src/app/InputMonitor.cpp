@@ -407,6 +407,7 @@ void InputMonitor::OnKeyDown(DWORD vkCode) {
         // 退格键：清理候选缓存，向下沉降的暗红/灰色余烬
         cachedCandidate_.clear();
         cachedCandidateList_.clear();
+        isComposing_ = false;
 
         float dropX = 0.0f, dropY = 0.0f;
         if (isPanelVisible_ && IsValidScreenCoord(cachedX_, cachedY_)) {
@@ -420,23 +421,22 @@ void InputMonitor::OnKeyDown(DWORD vkCode) {
         pParticleMgr_->EmitBackspaceDrop(dropX, dropY, *pConfig_);
     } else if (vkCode == VK_SPACE || vkCode == VK_RETURN) {
         // 空格/回车：
-        // 若当前候选框处于显示状态，上屏汉字完全由 Weasel IPC (OnRimeCommit) 权威派发，
-        // 彻底杜绝使用过期缓存导致"冒出上一次字"的问题。
-        // 若候选框未激活（如英文输入、日常打字空格），提供即时粒子点缀反馈。
-        if (!isPanelVisible_) {
+        // 若在输入法组合状态中，上屏汉字完全由 commitRing 环形队列权威派发；
+        // 若非组合态（如纯文本空格、英文间距），提供即时粒子点缀反馈。
+        if (!isPanelVisible_ && !isComposing_) {
             POINT pt = GetCurrentCaretPos();
             pParticleMgr_->EmitCommitText(
                 L"✦", static_cast<float>(pt.x), static_cast<float>(pt.y), 30.0f, 20.0f, *pConfig_, inCombo_
             );
         }
+        isComposing_ = false;
     } else if (vkCode >= '1' && vkCode <= '9') {
-        // 数字键：若未在输入法候选状态中，发射常规打字气泡；输入法选词则由 IPC 权威派发
         if (!isPanelVisible_) {
             POINT pt = GetCurrentCaretPos();
             pParticleMgr_->EmitTypingBubble(static_cast<float>(pt.x), static_cast<float>(pt.y), *pConfig_, inCombo_);
         }
     } else if (vkCode >= 'A' && vkCode <= 'Z') {
-        // 键入新字母时，任何上一次的历史候选缓存均立即清空失效
+        isComposing_ = true;
         cachedCandidate_.clear();
         cachedCandidateList_.clear();
 
@@ -464,86 +464,100 @@ void InputMonitor::PollIpcEvents() {
             pIpcData_ = static_cast<IpcData*>(MapViewOfFile(hSharedMem_, FILE_MAP_READ, 0, 0, sizeof(IpcData)));
             if (pIpcData_) {
                 LogApp("PollIpcEvents: Successfully mapped shared memory!");
+                lastReadCommitSeq_ = pIpcData_->commitSeq; // 对齐初始序号
+                lastCaretSeq_ = pIpcData_->caretSeq;
+                lastPanelSeq_ = pIpcData_->panelSeq;
+                lastIpcSeq_ = pIpcData_->sequence;
             }
         }
         if (!pIpcData_) return;
     }
     if (!pParticleMgr_ || !pConfig_) return;
 
-    if (pIpcData_->sequence != lastIpcSeq_) {
-        lastIpcSeq_ = pIpcData_->sequence;
-
-        if (pIpcData_->eventType == IpcEventType::PositionUpdated) {
-            // 仅更新输入法物理坐标，绝不污染或复活候选词缓存
-            if (IsValidScreenCoord(pIpcData_->commitX, pIpcData_->commitY)) {
-                cachedX_ = pIpcData_->commitX;
-                cachedY_ = pIpcData_->commitY;
-                cachedW_ = pIpcData_->commitW > 0 ? pIpcData_->commitW : 80.0f;
-                cachedH_ = pIpcData_->commitH > 0 ? pIpcData_->commitH : 30.0f;
-                lastPanelSeenTime_ = std::chrono::steady_clock::now();
-            }
-        } else if (pIpcData_->eventType == IpcEventType::CandidatesShown) {
-            if (IsValidScreenCoord(pIpcData_->commitX, pIpcData_->commitY)) {
-                cachedX_ = pIpcData_->commitX;
-                cachedY_ = pIpcData_->commitY;
-                cachedW_ = pIpcData_->commitW > 0 ? pIpcData_->commitW : 80.0f;
-                cachedH_ = pIpcData_->commitH > 0 ? pIpcData_->commitH : 30.0f;
-                isPanelVisible_ = true;
-                lastPanelSeenTime_ = std::chrono::steady_clock::now();
-            }
-            if (pIpcData_->committedText[0] != L'\0') {
-                cachedCandidate_ = pIpcData_->committedText;
-            }
-
-            cachedCandidateList_.clear();
-            for (uint32_t i = 0; i < pIpcData_->candidateCount; ++i) {
-                cachedCandidateList_.push_back(pIpcData_->candidates[i].text);
-            }
-        } else if (pIpcData_->eventType == IpcEventType::WindowHidden) {
-            isPanelVisible_ = false;
-            cachedCandidate_.clear();
-            cachedCandidateList_.clear();
-        } else if (pIpcData_->eventType == IpcEventType::CandidateCommitted) {
-            std::wstring committed(pIpcData_->committedText);
-            if (!committed.empty()) {
-                auto now = std::chrono::steady_clock::now();
-                auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastCommitTime_).count();
-
-                // 避免极端情况下的瞬态重复
-                if (committed != lastEmittedCommitText_ || elapsedMs > 80) {
-                    lastCommitTime_ = now;
-                    lastEmittedCommitText_ = committed;
-
-                    float emitX = IsValidScreenCoord(pIpcData_->commitX, pIpcData_->commitY) ? pIpcData_->commitX : cachedX_;
-                    float emitY = IsValidScreenCoord(pIpcData_->commitY, pIpcData_->commitY) ? pIpcData_->commitY : cachedY_;
-
-                    if (!IsValidScreenCoord(emitX, emitY)) {
-                        POINT pt = GetCurrentCaretPos();
-                        emitX = static_cast<float>(pt.x);
-                        emitY = static_cast<float>(pt.y);
-                    }
-
-                    int u8len = WideCharToMultiByte(CP_UTF8, 0, committed.c_str(), -1, nullptr, 0, nullptr, nullptr);
-                    std::string u8(u8len > 0 ? u8len - 1 : 0, 0);
-                    if (u8len > 1) WideCharToMultiByte(CP_UTF8, 0, committed.c_str(), -1, &u8[0], u8len, nullptr, nullptr);
-
-                    LogApp("PollIpcEvents: Emitting commit '" + u8 + "' at (" + std::to_string(emitX) + ", " + std::to_string(emitY) + ")");
-
-                    pParticleMgr_->EmitCommitText(
-                        committed,
-                        emitX,
-                        emitY,
-                        cachedW_ > 0 ? cachedW_ : 80.0f,
-                        cachedH_ > 0 ? cachedH_ : 30.0f,
-                        *pConfig_,
-                        inCombo_
-                    );
-                }
-            }
-            cachedCandidate_.clear();
-            cachedCandidateList_.clear();
-            isPanelVisible_ = false;
+    // 1. 高频光标位置更新通道 (永不与上屏事件竞争，全场景实时精准跟随)
+    if (pIpcData_->caretSeq != lastCaretSeq_) {
+        lastCaretSeq_ = pIpcData_->caretSeq;
+        if (IsValidScreenCoord(pIpcData_->caretX, pIpcData_->caretY)) {
+            cachedX_ = pIpcData_->caretX;
+            cachedY_ = pIpcData_->caretY;
+            cachedW_ = pIpcData_->caretW > 0 ? pIpcData_->caretW : 80.0f;
+            cachedH_ = pIpcData_->caretH > 0 ? pIpcData_->caretH : 30.0f;
+            lastPanelSeenTime_ = std::chrono::steady_clock::now();
         }
+    }
+
+    // 2. 候选词面板状态通道
+    if (pIpcData_->panelSeq != lastPanelSeq_) {
+        lastPanelSeq_ = pIpcData_->panelSeq;
+        isPanelVisible_ = pIpcData_->isPanelVisible;
+        if (!isPanelVisible_) {
+            cachedCandidate_.clear();
+            cachedCandidateList_.clear();
+        }
+    }
+
+    // 3. 候选词列表展现更新 (用于数字选词等)
+    if (pIpcData_->eventType == IpcEventType::CandidatesShown && pIpcData_->sequence != lastIpcSeq_) {
+        lastIpcSeq_ = pIpcData_->sequence;
+        if (IsValidScreenCoord(pIpcData_->commitX, pIpcData_->commitY)) {
+            cachedX_ = pIpcData_->commitX;
+            cachedY_ = pIpcData_->commitY;
+            cachedW_ = pIpcData_->commitW > 0 ? pIpcData_->commitW : 80.0f;
+            cachedH_ = pIpcData_->commitH > 0 ? pIpcData_->commitH : 30.0f;
+            isPanelVisible_ = true;
+            lastPanelSeenTime_ = std::chrono::steady_clock::now();
+        }
+        cachedCandidateList_.clear();
+        for (uint32_t i = 0; i < pIpcData_->candidateCount; ++i) {
+            cachedCandidateList_.push_back(pIpcData_->candidates[i].text);
+        }
+    }
+
+    // 4. 专属上屏环形队列通道 (批量消费，永不丢包，全场景兼容！)
+    uint32_t latestCommitSeq = pIpcData_->commitSeq;
+    if (latestCommitSeq != lastReadCommitSeq_) {
+        // 防止队列溢出断层
+        if (latestCommitSeq - lastReadCommitSeq_ > COMMIT_RING_SIZE) {
+            lastReadCommitSeq_ = latestCommitSeq - COMMIT_RING_SIZE;
+        }
+
+        while (lastReadCommitSeq_ < latestCommitSeq) {
+            lastReadCommitSeq_++;
+            uint32_t slot = lastReadCommitSeq_ % COMMIT_RING_SIZE;
+            const auto& rec = pIpcData_->commitRing[slot];
+            if (rec.seq == lastReadCommitSeq_ && rec.text[0] != L'\0') {
+                std::wstring committed(rec.text);
+
+                float emitX = IsValidScreenCoord(rec.x, rec.y) ? rec.x : cachedX_;
+                float emitY = IsValidScreenCoord(rec.x, rec.y) ? rec.y : cachedY_;
+
+                if (!IsValidScreenCoord(emitX, emitY)) {
+                    POINT pt = GetCurrentCaretPos();
+                    emitX = static_cast<float>(pt.x);
+                    emitY = static_cast<float>(pt.y);
+                }
+
+                int u8len = WideCharToMultiByte(CP_UTF8, 0, committed.c_str(), -1, nullptr, 0, nullptr, nullptr);
+                std::string u8(u8len > 0 ? u8len - 1 : 0, 0);
+                if (u8len > 1) WideCharToMultiByte(CP_UTF8, 0, committed.c_str(), -1, &u8[0], u8len, nullptr, nullptr);
+
+                LogApp("PollIpcEvents: Emitting commit '" + u8 + "' (commitSeq=" + std::to_string(lastReadCommitSeq_) + ") at (" + std::to_string(emitX) + ", " + std::to_string(emitY) + ")");
+
+                pParticleMgr_->EmitCommitText(
+                    committed,
+                    emitX,
+                    emitY,
+                    rec.w > 0 ? rec.w : (cachedW_ > 0 ? cachedW_ : 80.0f),
+                    rec.h > 0 ? rec.h : (cachedH_ > 0 ? cachedH_ : 30.0f),
+                    *pConfig_,
+                    inCombo_
+                );
+            }
+        }
+        cachedCandidate_.clear();
+        cachedCandidateList_.clear();
+        isPanelVisible_ = false;
+        isComposing_ = false;
     }
 }
 
