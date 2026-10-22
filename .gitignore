@@ -1,0 +1,29 @@
+# Build directories
+build/
+bin/
+out/
+
+# Compiled object files and binaries
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+
+# Logs
+*.log
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.vs/
+*.user
+
+# OS generated files
+.DS_Store
+Thumbs.db
