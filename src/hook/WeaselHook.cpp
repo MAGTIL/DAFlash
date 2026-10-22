@@ -352,21 +352,20 @@ void WeaselHookManager::OnWeaselPanelVisibility(HWND hWnd, bool visible) {
 
     if (wasVisible && !visible) {
         // Window transitioned from shown to hidden
-        if (!lastCommittedCandidate_.empty()) {
-            if (pIpcData_ && hMutex_) {
-                WaitForSingleObject(hMutex_, 50);
-                pIpcData_->eventType = IpcEventType::CandidateCommitted;
-                pIpcData_->sequence++;
-                wcsncpy_s(pIpcData_->committedText, lastCommittedCandidate_.c_str(), 63);
-                pIpcData_->commitX = lastCommittedX_;
-                pIpcData_->commitY = lastCommittedY_;
-                pIpcData_->commitW = lastCommittedW_;
-                pIpcData_->commitH = lastCommittedH_;
-                ReleaseMutex(hMutex_);
-                if (hEvent_) SetEvent(hEvent_);
-            }
+        lastCommittedCandidate_.clear();
+        tempCandidates_.clear();
+        currentCandidates_.clear();
+
+        if (pIpcData_ && hMutex_) {
+            WaitForSingleObject(hMutex_, 50);
+            pIpcData_->eventType = IpcEventType::WindowHidden;
+            pIpcData_->committedText[0] = L'\0';
+            pIpcData_->candidateCount = 0;
+            MemoryBarrier();
+            pIpcData_->sequence++;
+            ReleaseMutex(hMutex_);
+            if (hEvent_) SetEvent(hEvent_);
         }
-        NotifyIpc(IpcEventType::WindowHidden);
     }
 }
 
@@ -457,27 +456,35 @@ void WeaselHookManager::OnRimeCommit(const char* utf8Text) {
     MultiByteToWideChar(CP_UTF8, 0, utf8Text, -1, &wstr[0], len);
     wstr.resize(len - 1);
 
+    if (hMutex_) WaitForSingleObject(hMutex_, 50);
     wcsncpy_s(pIpcData_->committedText, wstr.c_str(), 63);
     pIpcData_->eventType = IpcEventType::CandidateCommitted;
     MemoryBarrier();
     pIpcData_->sequence++;
+    if (hMutex_) ReleaseMutex(hMutex_);
 
     if (hEvent_) {
         SetEvent(hEvent_);
     }
+
+    lastCommittedCandidate_.clear();
+    tempCandidates_.clear();
+    currentCandidates_.clear();
 
     LogHook("OnRimeCommit: " + std::string(utf8Text) + " (seq=" + std::to_string(pIpcData_->sequence) + ") at (" + std::to_string(pIpcData_->commitX) + ", " + std::to_string(pIpcData_->commitY) + ")");
 }
 
 void WeaselHookManager::OnInputPositionUpdated(int left, int top, int height) {
     if (!pIpcData_) return;
+    if (hMutex_) WaitForSingleObject(hMutex_, 50);
     pIpcData_->commitX = static_cast<float>(left);
     pIpcData_->commitY = static_cast<float>(top);
     pIpcData_->commitW = 80.0f;
     pIpcData_->commitH = height > 0 ? static_cast<float>(height) : 28.0f;
-    pIpcData_->eventType = IpcEventType::CandidatesShown;
+    pIpcData_->eventType = IpcEventType::PositionUpdated;
     MemoryBarrier();
     pIpcData_->sequence++;
+    if (hMutex_) ReleaseMutex(hMutex_);
     if (hEvent_) SetEvent(hEvent_);
     LogHook("OnInputPositionUpdated: (" + std::to_string(left) + ", " + std::to_string(top) + ", h=" + std::to_string(height) + ")");
 }

@@ -1,4 +1,4 @@
-﻿#include "InputMonitor.h"
+#include "InputMonitor.h"
 #include <uiautomation.h>
 #include <oleauto.h>
 
@@ -404,7 +404,10 @@ void InputMonitor::OnKeyDown(DWORD vkCode) {
 
     // 2. 行为级特效映射
     if (vkCode == VK_BACK) {
-        // 退格键：向下沉降的暗红/灰色余烬
+        // 退格键：清理候选缓存，向下沉降的暗红/灰色余烬
+        cachedCandidate_.clear();
+        cachedCandidateList_.clear();
+
         float dropX = 0.0f, dropY = 0.0f;
         if (isPanelVisible_ && IsValidScreenCoord(cachedX_, cachedY_)) {
             dropX = cachedX_;
@@ -416,38 +419,27 @@ void InputMonitor::OnKeyDown(DWORD vkCode) {
         }
         pParticleMgr_->EmitBackspaceDrop(dropX, dropY, *pConfig_);
     } else if (vkCode == VK_SPACE || vkCode == VK_RETURN) {
-        // 空格/回车选词上屏
-        if (!cachedCandidate_.empty() && IsValidScreenCoord(cachedX_, cachedY_)) {
-            lastCommitTime_ = now;
-            lastEmittedCommitText_ = cachedCandidate_;
-            pParticleMgr_->EmitCommitText(
-                cachedCandidate_, cachedX_, cachedY_, cachedW_, cachedH_, *pConfig_, inCombo_
-            );
-            cachedCandidate_.clear();
-            cachedCandidateList_.clear();
-        } else {
+        // 空格/回车：
+        // 若当前候选框处于显示状态，上屏汉字完全由 Weasel IPC (OnRimeCommit) 权威派发，
+        // 彻底杜绝使用过期缓存导致"冒出上一次字"的问题。
+        // 若候选框未激活（如英文输入、日常打字空格），提供即时粒子点缀反馈。
+        if (!isPanelVisible_) {
             POINT pt = GetCurrentCaretPos();
             pParticleMgr_->EmitCommitText(
                 L"✦", static_cast<float>(pt.x), static_cast<float>(pt.y), 30.0f, 20.0f, *pConfig_, inCombo_
             );
         }
     } else if (vkCode >= '1' && vkCode <= '9') {
-        // 数字键选词上屏
-        size_t idx = vkCode - '1';
-        if (idx < cachedCandidateList_.size() && !cachedCandidateList_[idx].empty() && IsValidScreenCoord(cachedX_, cachedY_)) {
-            std::wstring chosen = cachedCandidateList_[idx];
-            lastCommitTime_ = now;
-            lastEmittedCommitText_ = chosen;
-            pParticleMgr_->EmitCommitText(
-                chosen, cachedX_, cachedY_, cachedW_, cachedH_, *pConfig_, inCombo_
-            );
-            cachedCandidate_.clear();
-            cachedCandidateList_.clear();
-        } else {
+        // 数字键：若未在输入法候选状态中，发射常规打字气泡；输入法选词则由 IPC 权威派发
+        if (!isPanelVisible_) {
             POINT pt = GetCurrentCaretPos();
             pParticleMgr_->EmitTypingBubble(static_cast<float>(pt.x), static_cast<float>(pt.y), *pConfig_, inCombo_);
         }
     } else if (vkCode >= 'A' && vkCode <= 'Z') {
+        // 键入新字母时，任何上一次的历史候选缓存均立即清空失效
+        cachedCandidate_.clear();
+        cachedCandidateList_.clear();
+
         // 普通字母输入：光标或候选框处向上发射冷光小气泡
         float bubbleX = 0.0f, bubbleY = 0.0f;
         if (isPanelVisible_ && IsValidScreenCoord(cachedX_, cachedY_)) {
@@ -481,7 +473,16 @@ void InputMonitor::PollIpcEvents() {
     if (pIpcData_->sequence != lastIpcSeq_) {
         lastIpcSeq_ = pIpcData_->sequence;
 
-        if (pIpcData_->eventType == IpcEventType::CandidatesShown) {
+        if (pIpcData_->eventType == IpcEventType::PositionUpdated) {
+            // 仅更新输入法物理坐标，绝不污染或复活候选词缓存
+            if (IsValidScreenCoord(pIpcData_->commitX, pIpcData_->commitY)) {
+                cachedX_ = pIpcData_->commitX;
+                cachedY_ = pIpcData_->commitY;
+                cachedW_ = pIpcData_->commitW > 0 ? pIpcData_->commitW : 80.0f;
+                cachedH_ = pIpcData_->commitH > 0 ? pIpcData_->commitH : 30.0f;
+                lastPanelSeenTime_ = std::chrono::steady_clock::now();
+            }
+        } else if (pIpcData_->eventType == IpcEventType::CandidatesShown) {
             if (IsValidScreenCoord(pIpcData_->commitX, pIpcData_->commitY)) {
                 cachedX_ = pIpcData_->commitX;
                 cachedY_ = pIpcData_->commitY;
@@ -500,18 +501,21 @@ void InputMonitor::PollIpcEvents() {
             }
         } else if (pIpcData_->eventType == IpcEventType::WindowHidden) {
             isPanelVisible_ = false;
+            cachedCandidate_.clear();
+            cachedCandidateList_.clear();
         } else if (pIpcData_->eventType == IpcEventType::CandidateCommitted) {
             std::wstring committed(pIpcData_->committedText);
             if (!committed.empty()) {
                 auto now = std::chrono::steady_clock::now();
                 auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastCommitTime_).count();
-                // 防抖：若 250ms 内已经由键盘事件触发过同一词汇，避免重复产生双份粒子
-                if (committed != lastEmittedCommitText_ || elapsedMs > 250) {
+
+                // 避免极端情况下的瞬态重复
+                if (committed != lastEmittedCommitText_ || elapsedMs > 80) {
                     lastCommitTime_ = now;
                     lastEmittedCommitText_ = committed;
 
                     float emitX = IsValidScreenCoord(pIpcData_->commitX, pIpcData_->commitY) ? pIpcData_->commitX : cachedX_;
-                    float emitY = IsValidScreenCoord(pIpcData_->commitX, pIpcData_->commitY) ? pIpcData_->commitY : cachedY_;
+                    float emitY = IsValidScreenCoord(pIpcData_->commitY, pIpcData_->commitY) ? pIpcData_->commitY : cachedY_;
 
                     if (!IsValidScreenCoord(emitX, emitY)) {
                         POINT pt = GetCurrentCaretPos();

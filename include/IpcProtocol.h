@@ -15,6 +15,7 @@ constexpr const wchar_t* EVENT_NAME = L"Local\\DAFlash_Weasel_Event";
 
 enum class IpcEventType : uint32_t {
     None = 0,
+    PositionUpdated,      // 光标/输入坐标更新 (高精度 TSF 管道)
     CandidatesShown,      // 候选词列表展示/更新
     CandidateCommitted,   // 某个候选词被选中上屏
     PreeditInput,         // 正在键入拼音 (Preedit)
